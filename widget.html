@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Energy Contracts Widget</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: transparent;
+            padding: 12px;
+            color: #1a1a1a;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+            gap: 12px;
+        }
+
+        .card {
+            background: #fff;
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            padding: 14px;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+        }
+
+        .card-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #f0f0f0;
+        }
+
+        .card-header img {
+            height: 28px;
+            object-fit: contain;
+        }
+
+        .card-title {
+            font-weight: 700;
+            font-size: 0.95em;
+            color: #111;
+        }
+
+        .card-subtitle {
+            font-size: 0.78em;
+            color: #666;
+            margin-top: 2px;
+        }
+
+        .badge {
+            margin-left: auto;
+            background: #6366f1;
+            color: white;
+            border-radius: 99px;
+            padding: 2px 8px;
+            font-size: 0.75em;
+            font-weight: 700;
+            white-space: nowrap;
+        }
+
+        .field {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            padding: 4px 0;
+            font-size: 0.85em;
+        }
+
+        .field-label { color: #555; }
+
+        .field-value { font-weight: 600; color: #222; }
+
+        .field-value.price {
+            font-size: 1.1em;
+            color: #16a34a;
+        }
+
+        .empty, .loading {
+            text-align: center;
+            color: #888;
+            padding: 24px;
+            font-size: 0.95em;
+        }
+
+        .spinner {
+            width: 28px; height: 28px;
+            border: 3px solid #e5e7eb;
+            border-top-color: #6366f1;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin: 0 auto 10px;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div id="root"><div class="loading"><div class="spinner"></div>Loading contracts…</div></div>
+
+    <script>
+        function cellMap(row) {
+            const map = {};
+            (row.cells || []).forEach(c => { map[c.name] = c; });
+            return map;
+        }
+
+        function get(map, name) { return map[name]?.value || ''; }
+        function linkUrl(map, name) { return map[name]?.linkUrl || null; }
+
+        function renderCard(row) {
+            const d = cellMap(row);
+            const providerName = get(d, 'LeverancierName') || 'Energy Contract';
+            const logoUrl      = get(d, 'LeverancierLogo');
+            const contractName = get(d, 'ContractName');
+            const position     = get(d, 'Order');
+            const provUrl      = linkUrl(d, 'LeverancierName');
+
+            const fields = [
+                { label: 'Maandbedrag',            value: get(d, 'MonthlyPremium'),         price: true },
+                { label: 'Stroom per kWh',          value: get(d, 'ElectricityTariff') },
+                { label: 'Gas per m³',              value: get(d, 'GasTariff') },
+                { label: 'Korting 1e jaar',         value: get(d, 'Discount1stContractYear') },
+                { label: 'Korting totaal',          value: get(d, 'Discount') },
+            ];
+
+            const fieldsHtml = fields
+                .filter(f => f.value)
+                .map(f => `<div class="field">
+                    <span class="field-label">${f.label}</span>
+                    <span class="field-value${f.price ? ' price' : ''}">${f.value}</span>
+                </div>`).join('');
+
+            const logoHtml = logoUrl
+                ? `<img src="${logoUrl}" alt="${providerName}">`
+                : '';
+
+            const nameHtml = provUrl
+                ? `<a href="https://www.independer.nl${provUrl}" target="_blank" rel="noopener"
+                      style="color:#6366f1;text-decoration:none;">${providerName}</a>`
+                : providerName;
+
+            return `<div class="card">
+                <div class="card-header">
+                    ${logoHtml}
+                    <div>
+                        <div class="card-title">${nameHtml}</div>
+                        <div class="card-subtitle">${contractName}</div>
+                    </div>
+                    ${position ? `<span class="badge">#${position}</span>` : ''}
+                </div>
+                ${fieldsHtml}
+            </div>`;
+        }
+
+        function render(data) {
+            const rows = data?.dataRows ?? (Array.isArray(data) ? data : null);
+            const root = document.getElementById('root');
+
+            if (!rows || rows.length === 0) {
+                root.innerHTML = '<div class="empty">No contracts found.</div>';
+                return;
+            }
+
+            root.innerHTML = `<div class="grid">${rows.map(renderCard).join('')}</div>`;
+        }
+
+        // --- MCP Apps bridge (postMessage) ---
+        window.addEventListener('message', (event) => {
+            if (event.source !== window.parent) return;
+            const msg = event.data;
+            if (!msg || msg.jsonrpc !== '2.0') return;
+
+            if (msg.method === 'ui/notifications/tool-result') {
+                const structured = msg.params?.structuredContent;
+                if (structured) render(structured);
+            }
+        }, { passive: true });
+
+        // --- Apps SDK legacy (window.openai) ---
+        function tryLegacy() {
+            const output = window.openai?.toolOutput;
+            if (output) { render(output); return; }
+        }
+
+        window.addEventListener('openai:set_globals', (event) => {
+            const output = event.detail?.globals?.toolOutput ?? window.openai?.toolOutput;
+            if (output) render(output);
+        }, { passive: true });
+
+        tryLegacy();
+    </script>
+</body>
+</html>
