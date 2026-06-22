@@ -241,8 +241,28 @@
             return false;
         }
 
+        function notifyReady() {
+            try {
+                if (typeof globalThis.openai?.ready === 'function') {
+                    globalThis.openai.ready();
+                }
+            } catch {
+                // Ignore bridge errors; fallback channels below may still work.
+            }
+
+            try {
+                globalThis.parent?.postMessage({
+                    jsonrpc: '2.0',
+                    method: 'ui/ready',
+                    params: {}
+                }, '*');
+            } catch {
+                // Ignore postMessage failures in restricted contexts.
+            }
+        }
+
         // --- MCP Apps bridge (postMessage) ---
-        window.addEventListener('message', (event) => {
+        globalThis.addEventListener('message', (event) => {
             const msg = parseMaybeJson(event.data);
             if (!msg) return;
 
@@ -254,6 +274,12 @@
             tryRenderFromAny(msg);
         }, { passive: true });
 
+        document.addEventListener('message', (event) => {
+            const msg = parseMaybeJson(event.data);
+            if (!msg) return;
+            tryRenderFromAny(msg);
+        }, { passive: true });
+
         // --- Apps SDK legacy (window.openai) ---
         function tryLegacy() {
             const output = globalThis.openai?.toolOutput;
@@ -262,12 +288,36 @@
             }
         }
 
+        function startLegacyPolling() {
+            let attempts = 0;
+            const maxAttempts = 80; // ~20s at 250ms
+            const interval = globalThis.setInterval(() => {
+                attempts += 1;
+                const output = globalThis.openai?.toolOutput;
+                if (output && tryRenderFromAny(output)) {
+                    globalThis.clearInterval(interval);
+                    return;
+                }
+
+                if (attempts >= maxAttempts) {
+                    globalThis.clearInterval(interval);
+                }
+            }, 250);
+        }
+
         globalThis.addEventListener('openai:set_globals', (event) => {
             const output = event.detail?.globals?.toolOutput ?? globalThis.openai?.toolOutput;
             if (output) tryRenderFromAny(output);
         }, { passive: true });
 
+        document.addEventListener('openai:set_globals', (event) => {
+            const output = event.detail?.globals?.toolOutput ?? globalThis.openai?.toolOutput;
+            if (output) tryRenderFromAny(output);
+        }, { passive: true });
+
+        notifyReady();
         tryLegacy();
+        startLegacyPolling();
     </script>
 </body>
 </html>
