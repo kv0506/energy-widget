@@ -20,6 +20,62 @@
             gap: 12px;
         }
 
+        .toolbar {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 12px;
+            flex-wrap: wrap;
+        }
+
+        .contract-type-btn {
+            border: 1px solid #d1d5db;
+            background: #ffffff;
+            color: #374151;
+            border-radius: 999px;
+            padding: 6px 12px;
+            font-size: 0.82em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.18s ease;
+        }
+
+        .contract-type-btn:hover {
+            border-color: #9ca3af;
+            background: #f9fafb;
+        }
+
+        .contract-type-btn.active {
+            background: #111827;
+            color: #ffffff;
+            border-color: #111827;
+            box-shadow: 0 0 0 2px rgba(17, 24, 39, 0.22);
+        }
+
+        .contract-type-btn:disabled {
+            opacity: 0.7;
+            cursor: not-allowed;
+        }
+
+        .selected-type-row {
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.82em;
+            color: #4b5563;
+        }
+
+        .selected-type-pill {
+            display: inline-flex;
+            align-items: center;
+            border-radius: 999px;
+            border: 1px solid #c7d2fe;
+            background: #eef2ff;
+            color: #3730a3;
+            padding: 3px 10px;
+            font-weight: 700;
+        }
+
         .card {
             background: #fff;
             border: 1px solid #e5e7eb;
@@ -123,13 +179,26 @@
     </style>
 </head>
 <body>
-    <div id="root"><div class="loading"><div class="spinner"></div>Loading contracts…</div></div>
+    <div class="toolbar" id="contractTypeToolbar" role="tablist" aria-label="Contract type">
+        <button class="contract-type-btn active" data-type="Combination" type="button">Combination</button>
+        <button class="contract-type-btn" data-type="Electra" type="button">Electra</button>
+        <button class="contract-type-btn" data-type="Gas" type="button">Gas</button>
+    </div>
+    <div class="selected-type-row" aria-live="polite">
+        <span>Current selection:</span>
+        <span class="selected-type-pill" id="selectedContractTypeLabel">Combination</span>
+    </div>
+    <div id="root"><div class="loading"><div class="spinner"></div>Loading combination contracts…</div></div>
 
     <script>
         const FORCE_DEBUG = false;
         const DEBUG_MODE = FORCE_DEBUG
             || new URLSearchParams(globalThis.location.search).get('debug') === '1'
             || globalThis.localStorage?.getItem('energyWidgetDebug') === '1';
+        const TOOL_NAME = 'get_cheapest_fixed_energy_contracts';
+        const CONTRACT_TYPES = new Set(['Combination', 'Electra', 'Gas']);
+        let selectedContractType = 'Combination';
+        let requestInFlight = false;
         const debugEvents = [];
 
         function summarizePayload(value) {
@@ -171,6 +240,106 @@
             const map = {};
             (row.cells || []).forEach(c => { map[c.name] = c; });
             return map;
+        }
+
+        function loadingText(type) {
+            return `Loading ${String(type || 'contracts').toLowerCase()} contracts…`;
+        }
+
+        function setLoading(text) {
+            const root = document.getElementById('root');
+            root.innerHTML = `<div class="loading"><div class="spinner"></div>${text}</div>`;
+        }
+
+        function setContractButtonsDisabled(disabled) {
+            const buttons = document.querySelectorAll('.contract-type-btn');
+            buttons.forEach((btn) => { btn.disabled = disabled; });
+        }
+
+        function updateContractTypeUI() {
+            const buttons = document.querySelectorAll('.contract-type-btn');
+            buttons.forEach((btn) => {
+                const active = btn.dataset.type === selectedContractType;
+                btn.classList.toggle('active', active);
+                btn.setAttribute('aria-selected', active ? 'true' : 'false');
+                btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+                btn.setAttribute('role', 'tab');
+            });
+
+            const selectedLabel = document.getElementById('selectedContractTypeLabel');
+            if (selectedLabel) {
+                selectedLabel.textContent = selectedContractType;
+            }
+        }
+
+        function requestContracts(contractType) {
+            if (!CONTRACT_TYPES.has(contractType) || requestInFlight) return;
+
+            requestInFlight = true;
+            setContractButtonsDisabled(true);
+            setLoading(loadingText(contractType));
+            debugLog('request_contracts_start', { tool: TOOL_NAME, contractType });
+
+            if (typeof globalThis.openai?.callTool !== 'function') {
+                debugLog('request_contracts_calltool_unavailable', {
+                    contractType,
+                    hasOpenAI: !!globalThis.openai
+                });
+                requestInFlight = false;
+                setContractButtonsDisabled(false);
+                return;
+            }
+
+            globalThis.openai.callTool(TOOL_NAME, { contractType })
+                .then((result) => {
+                    const rendered = tryRenderFromAny(result);
+                    if (!rendered) {
+                        const root = document.getElementById('root');
+                        root.innerHTML = '<div class="empty">No contracts found.</div>';
+                    }
+                    debugLog('request_contracts_done', {
+                        contractType,
+                        rendered,
+                        resultSummary: summarizePayload(result)
+                    });
+                })
+                .catch((error) => {
+                    const root = document.getElementById('root');
+                    root.innerHTML = '<div class="empty">Could not load contracts. Please try again.</div>';
+                    debugLog('request_contracts_error', {
+                        contractType,
+                        message: String(error?.message || error)
+                    });
+                })
+                .finally(() => {
+                    requestInFlight = false;
+                    setContractButtonsDisabled(false);
+                });
+        }
+
+        function setContractType(contractType, triggerFetch = true) {
+            if (!CONTRACT_TYPES.has(contractType)) return;
+            selectedContractType = contractType;
+            updateContractTypeUI();
+            debugLog('set_contract_type', { contractType, triggerFetch });
+            if (triggerFetch) {
+                requestContracts(contractType);
+            }
+        }
+
+        function setupContractTypeControls() {
+            const toolbar = document.getElementById('contractTypeToolbar');
+            if (!toolbar) return;
+
+            toolbar.addEventListener('click', (event) => {
+                const button = event.target.closest('.contract-type-btn');
+                if (!button) return;
+                const type = button.dataset.type;
+                if (!type || type === selectedContractType) return;
+                setContractType(type, true);
+            });
+
+            updateContractTypeUI();
         }
 
         function get(map, name) { return map[name]?.value || ''; }
@@ -430,9 +599,15 @@
             href: globalThis.location.href,
             debugMode: DEBUG_MODE
         });
+        setupContractTypeControls();
         notifyReady();
         tryLegacy();
         startLegacyPolling();
+
+        // Tool now requires contractType; default to Combination.
+        if (typeof globalThis.openai?.callTool === 'function') {
+            requestContracts(selectedContractType);
+        }
 
         globalThis.setTimeout(() => {
             const root = document.getElementById('root');
