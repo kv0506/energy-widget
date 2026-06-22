@@ -198,7 +198,7 @@
         const TOOL_NAME = 'get_cheapest_fixed_energy_contracts';
         const CONTRACT_TYPES = new Set(['Combination', 'Electra', 'Gas']);
         let selectedContractType = 'Combination';
-        let requestInFlight = false;
+        let latestRequestId = 0;
         const debugEvents = [];
 
         function summarizePayload(value) {
@@ -251,11 +251,6 @@
             root.innerHTML = `<div class="loading"><div class="spinner"></div>${text}</div>`;
         }
 
-        function setContractButtonsDisabled(disabled) {
-            const buttons = document.querySelectorAll('.contract-type-btn');
-            buttons.forEach((btn) => { btn.disabled = disabled; });
-        }
-
         function updateContractTypeUI() {
             const buttons = document.querySelectorAll('.contract-type-btn');
             buttons.forEach((btn) => {
@@ -273,47 +268,83 @@
         }
 
         function requestContracts(contractType) {
-            if (!CONTRACT_TYPES.has(contractType) || requestInFlight) return;
+            if (!CONTRACT_TYPES.has(contractType)) return;
 
-            requestInFlight = true;
-            setContractButtonsDisabled(true);
+            const requestId = ++latestRequestId;
+            const isLatest = () => requestId === latestRequestId;
+
             setLoading(loadingText(contractType));
-            debugLog('request_contracts_start', { tool: TOOL_NAME, contractType });
+            debugLog('request_contracts_start', { tool: TOOL_NAME, contractType, requestId });
 
             if (typeof globalThis.openai?.callTool !== 'function') {
                 debugLog('request_contracts_calltool_unavailable', {
                     contractType,
                     hasOpenAI: !!globalThis.openai
                 });
-                requestInFlight = false;
-                setContractButtonsDisabled(false);
                 return;
             }
 
+            let settled = false;
+            const timeoutHandle = globalThis.setTimeout(() => {
+                if (settled || !isLatest()) return;
+                settled = true;
+                debugLog('request_contracts_timeout', { contractType, requestId });
+                const root = document.getElementById('root');
+                if (root && /Loading/i.test(root.textContent || '')) {
+                    root.innerHTML = '<div class="empty">Still loading. Try switching type again.</div>';
+                }
+            }, 12000);
+
+            const markSettled = () => {
+                if (settled) return;
+                settled = true;
+                globalThis.clearTimeout(timeoutHandle);
+            };
+
             globalThis.openai.callTool(TOOL_NAME, { contractType })
                 .then((result) => {
-                    const rendered = tryRenderFromAny(result);
-                    if (!rendered) {
-                        const root = document.getElementById('root');
-                        root.innerHTML = '<div class="empty">No contracts found.</div>';
+                    if (!isLatest()) {
+                        debugLog('request_contracts_stale_response', { contractType, requestId });
+                        markSettled();
+                        return;
                     }
+
+                    // For direct tool calls, prefer rows in this result over legacy globals.
+                    const rows = extractRowsFromPayload(result, false);
+                    const rendered = !!rows;
+
+                    if (rows) {
+                        renderRows(rows);
+                    } else {
+                        tryRenderFromAny(result);
+                        const root = document.getElementById('root');
+                        if (root && /Loading/i.test(root.textContent || '')) {
+                            root.innerHTML = '<div class="empty">No contracts found.</div>';
+                        }
+                    }
+
                     debugLog('request_contracts_done', {
                         contractType,
+                        requestId,
                         rendered,
                         resultSummary: summarizePayload(result)
                     });
+                    markSettled();
                 })
                 .catch((error) => {
+                    if (!isLatest()) {
+                        markSettled();
+                        return;
+                    }
+
                     const root = document.getElementById('root');
                     root.innerHTML = '<div class="empty">Could not load contracts. Please try again.</div>';
                     debugLog('request_contracts_error', {
                         contractType,
+                        requestId,
                         message: String(error?.message || error)
                     });
-                })
-                .finally(() => {
-                    requestInFlight = false;
-                    setContractButtonsDisabled(false);
+                    markSettled();
                 });
         }
 
@@ -335,7 +366,7 @@
                 const button = event.target.closest('.contract-type-btn');
                 if (!button) return;
                 const type = button.dataset.type;
-                if (!type || type === selectedContractType) return;
+                if (!type) return;
                 setContractType(type, true);
             });
 
@@ -420,6 +451,10 @@
 
         function render(data) {
             const rows = toRows(data);
+            renderRows(rows);
+        }
+
+        function renderRows(rows) {
             const root = document.getElementById('root');
             debugLog('render_called', { rowCount: rows ? rows.length : 0 });
 
@@ -433,50 +468,64 @@
             debugLog('render_success', { rowCount: rows.length });
         }
 
-        function tryRenderFromAny(payload) {
-            const contentBlocks = Array.isArray(payload?.content) ? payload.content : [];
-            const callToolContentBlocks = Array.isArray(payload?.call_tool_result?.content)
-                ? payload.call_tool_result.content
-                : [];
+        function extractRowsFromPayload(payload, includeLegacyGlobals = true) {
+            const queue = [parseMaybeJson(payload)];
 
-            const candidates = [
-                payload,
-                payload?.params,
-                payload?.structuredContent,
-                payload?.params?.structuredContent,
-                payload?.params?.result,
-                payload?.result,
-                payload?.call_tool_result,
-                payload?.call_tool_result?.structuredContent,
-                payload?.toolOutput,
-                payload?.output,
-                payload?.data,
-                payload?.detail?.globals?.toolOutput,
-                payload?.detail?.toolOutput,
-                ...contentBlocks,
-                ...contentBlocks.map(c => c?.structuredContent),
-                ...contentBlocks.map(c => c?.data),
-                ...contentBlocks.map(c => c?.json),
-                ...callToolContentBlocks,
-                ...callToolContentBlocks.map(c => c?.structuredContent),
-                ...callToolContentBlocks.map(c => c?.data),
-                ...callToolContentBlocks.map(c => c?.json),
-            ].map(parseMaybeJson);
+            while (queue.length > 0) {
+                const current = parseMaybeJson(queue.shift());
+                if (!current) continue;
 
-            for (const candidate of candidates) {
-                if (!candidate) continue;
-                const rows = toRows(candidate);
-                if (rows) {
-                    debugLog('candidate_matched', {
-                        rowCount: rows.length,
-                        summary: summarizePayload(candidate)
-                    });
-                    render(candidate);
-                    return true;
+                const rows = toRows(current);
+                if (rows) return rows;
+
+                if (typeof current !== 'object') continue;
+
+                let nextCandidates = [
+                    current.params,
+                    current.structuredContent,
+                    current.result,
+                    current.data,
+                    current.output,
+                    current.call_tool_result,
+                ];
+
+                if (includeLegacyGlobals) {
+                    nextCandidates = [
+                        ...nextCandidates,
+                        current.toolOutput,
+                        current.detail?.globals?.toolOutput,
+                        current.detail?.toolOutput,
+                    ];
                 }
+
+                if (Array.isArray(current.content)) {
+                    nextCandidates = [
+                        ...nextCandidates,
+                        ...current.content,
+                        ...current.content.map((c) => c?.structuredContent),
+                        ...current.content.map((c) => c?.data),
+                        ...current.content.map((c) => c?.json),
+                    ];
+                }
+
+                queue.push(...nextCandidates);
             }
 
-            debugLog('candidate_no_match', { checked: candidates.length });
+            return null;
+        }
+
+        function tryRenderFromAny(payload) {
+            const rows = extractRowsFromPayload(payload, true);
+            if (rows) {
+                debugLog('candidate_matched', {
+                    rowCount: rows.length,
+                    summary: summarizePayload(payload)
+                });
+                renderRows(rows);
+                return true;
+            }
+
+            debugLog('candidate_no_match', { checked: 0 });
             return false;
         }
 
