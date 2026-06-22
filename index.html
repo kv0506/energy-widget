@@ -159,8 +159,36 @@
             </div>`;
         }
 
+        function toRows(data) {
+            if (!data) return null;
+            if (Array.isArray(data)) return data;
+            if (Array.isArray(data.dataRows)) return data.dataRows;
+            if (Array.isArray(data.rows)) return data.rows;
+            if (Array.isArray(data.contracts)) return data.contracts;
+            if (Array.isArray(data.items)) return data.items;
+            if (Array.isArray(data.call_tool_result?.dataRows)) return data.call_tool_result.dataRows;
+            if (Array.isArray(data.call_tool_result?.rows)) return data.call_tool_result.rows;
+            if (Array.isArray(data.call_tool_result?.contracts)) return data.call_tool_result.contracts;
+            if (Array.isArray(data.result?.dataRows)) return data.result.dataRows;
+            if (Array.isArray(data.result?.rows)) return data.result.rows;
+            if (Array.isArray(data.result?.contracts)) return data.result.contracts;
+            if (Array.isArray(data.output?.dataRows)) return data.output.dataRows;
+            if (Array.isArray(data.structuredContent?.dataRows)) return data.structuredContent.dataRows;
+            if (Array.isArray(data.call_tool_result?.structuredContent?.dataRows)) return data.call_tool_result.structuredContent.dataRows;
+            return null;
+        }
+
+        function parseMaybeJson(value) {
+            if (typeof value !== 'string') return value;
+            try {
+                return JSON.parse(value);
+            } catch {
+                return value;
+            }
+        }
+
         function render(data) {
-            const rows = data?.dataRows ?? (Array.isArray(data) ? data : null);
+            const rows = toRows(data);
             const root = document.getElementById('root');
 
             if (!rows || rows.length === 0) {
@@ -171,27 +199,72 @@
             root.innerHTML = `<div class="grid">${rows.map(renderCard).join('')}</div>`;
         }
 
+        function tryRenderFromAny(payload) {
+            const contentBlocks = Array.isArray(payload?.content) ? payload.content : [];
+            const callToolContentBlocks = Array.isArray(payload?.call_tool_result?.content)
+                ? payload.call_tool_result.content
+                : [];
+
+            const candidates = [
+                payload,
+                payload?.params,
+                payload?.structuredContent,
+                payload?.params?.structuredContent,
+                payload?.params?.result,
+                payload?.result,
+                payload?.call_tool_result,
+                payload?.call_tool_result?.structuredContent,
+                payload?.toolOutput,
+                payload?.output,
+                payload?.data,
+                payload?.detail?.globals?.toolOutput,
+                payload?.detail?.toolOutput,
+                ...contentBlocks,
+                ...contentBlocks.map(c => c?.structuredContent),
+                ...contentBlocks.map(c => c?.data),
+                ...contentBlocks.map(c => c?.json),
+                ...callToolContentBlocks,
+                ...callToolContentBlocks.map(c => c?.structuredContent),
+                ...callToolContentBlocks.map(c => c?.data),
+                ...callToolContentBlocks.map(c => c?.json),
+            ].map(parseMaybeJson);
+
+            for (const candidate of candidates) {
+                if (!candidate) continue;
+                const rows = toRows(candidate);
+                if (rows) {
+                    render(candidate);
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         // --- MCP Apps bridge (postMessage) ---
         window.addEventListener('message', (event) => {
-            if (event.source !== window.parent) return;
-            const msg = event.data;
-            if (!msg || msg.jsonrpc !== '2.0') return;
+            const msg = parseMaybeJson(event.data);
+            if (!msg) return;
 
-            if (msg.method === 'ui/notifications/tool-result') {
-                const structured = msg.params?.structuredContent;
-                if (structured) render(structured);
+            // Prefer explicit MCP notification handling, then fall back to generic extraction.
+            if (msg.jsonrpc === '2.0' && msg.method === 'ui/notifications/tool-result') {
+                if (tryRenderFromAny(msg.params)) return;
             }
+
+            tryRenderFromAny(msg);
         }, { passive: true });
 
         // --- Apps SDK legacy (window.openai) ---
         function tryLegacy() {
-            const output = window.openai?.toolOutput;
-            if (output) { render(output); return; }
+            const output = globalThis.openai?.toolOutput;
+            if (output) {
+                tryRenderFromAny(output);
+            }
         }
 
-        window.addEventListener('openai:set_globals', (event) => {
-            const output = event.detail?.globals?.toolOutput ?? window.openai?.toolOutput;
-            if (output) render(output);
+        globalThis.addEventListener('openai:set_globals', (event) => {
+            const output = event.detail?.globals?.toolOutput ?? globalThis.openai?.toolOutput;
+            if (output) tryRenderFromAny(output);
         }, { passive: true });
 
         tryLegacy();
