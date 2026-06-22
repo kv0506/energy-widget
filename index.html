@@ -126,7 +126,7 @@
     <div id="root"><div class="loading"><div class="spinner"></div>Loading contracts…</div></div>
 
     <script>
-        const FORCE_DEBUG = true;
+        const FORCE_DEBUG = false;
         const DEBUG_MODE = FORCE_DEBUG
             || new URLSearchParams(globalThis.location.search).get('debug') === '1'
             || globalThis.localStorage?.getItem('energyWidgetDebug') === '1';
