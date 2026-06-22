@@ -98,6 +98,27 @@
             margin: 0 auto 10px;
         }
 
+        .debug-panel {
+            position: fixed;
+            left: 8px;
+            right: 8px;
+            bottom: 8px;
+            z-index: 9999;
+            background: rgba(17, 24, 39, 0.95);
+            color: #e5e7eb;
+            border: 1px solid #374151;
+            border-radius: 8px;
+            padding: 8px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 11px;
+            line-height: 1.35;
+            max-height: 40vh;
+            overflow: auto;
+            white-space: pre-wrap;
+        }
+
+        .debug-hidden { display: none; }
+
         @keyframes spin { to { transform: rotate(360deg); } }
     </style>
 </head>
@@ -105,6 +126,47 @@
     <div id="root"><div class="loading"><div class="spinner"></div>Loading contracts…</div></div>
 
     <script>
+        const FORCE_DEBUG = true;
+        const DEBUG_MODE = FORCE_DEBUG
+            || new URLSearchParams(globalThis.location.search).get('debug') === '1'
+            || globalThis.localStorage?.getItem('energyWidgetDebug') === '1';
+        const debugEvents = [];
+
+        function summarizePayload(value) {
+            const parsed = parseMaybeJson(value);
+            if (parsed === null) return { type: 'null' };
+            const t = typeof parsed;
+            if (t !== 'object') return { type: t, value: String(parsed).slice(0, 80) };
+            if (Array.isArray(parsed)) return { type: 'array', length: parsed.length };
+
+            return {
+                type: 'object',
+                keys: Object.keys(parsed).slice(0, 12),
+                hasDataRows: Array.isArray(parsed.dataRows),
+                hasToolOutput: !!parsed.toolOutput,
+                hasStructuredContent: !!parsed.structuredContent,
+                hasCallToolResult: !!parsed.call_tool_result,
+            };
+        }
+
+        function debugLog(label, data) {
+            if (!DEBUG_MODE) return;
+            const payload = data ? ` ${JSON.stringify(data)}` : '';
+            const line = `[${new Date().toISOString()}] ${label}${payload}`;
+            debugEvents.push(line);
+            if (debugEvents.length > 80) debugEvents.shift();
+
+            let panel = document.getElementById('debug-panel');
+            if (!panel) {
+                panel = document.createElement('div');
+                panel.id = 'debug-panel';
+                panel.className = 'debug-panel';
+                document.body.appendChild(panel);
+            }
+
+            panel.textContent = debugEvents.join('\n');
+        }
+
         function cellMap(row) {
             const map = {};
             (row.cells || []).forEach(c => { map[c.name] = c; });
@@ -190,13 +252,16 @@
         function render(data) {
             const rows = toRows(data);
             const root = document.getElementById('root');
+            debugLog('render_called', { rowCount: rows ? rows.length : 0 });
 
             if (!rows || rows.length === 0) {
                 root.innerHTML = '<div class="empty">No contracts found.</div>';
+                debugLog('render_empty');
                 return;
             }
 
             root.innerHTML = `<div class="grid">${rows.map(renderCard).join('')}</div>`;
+            debugLog('render_success', { rowCount: rows.length });
         }
 
         function tryRenderFromAny(payload) {
@@ -233,21 +298,33 @@
                 if (!candidate) continue;
                 const rows = toRows(candidate);
                 if (rows) {
+                    debugLog('candidate_matched', {
+                        rowCount: rows.length,
+                        summary: summarizePayload(candidate)
+                    });
                     render(candidate);
                     return true;
                 }
             }
 
+            debugLog('candidate_no_match', { checked: candidates.length });
             return false;
         }
 
         function notifyReady() {
+            debugLog('notify_ready_start', {
+                hasOpenAI: !!globalThis.openai,
+                hasReadyFn: typeof globalThis.openai?.ready === 'function'
+            });
+
             try {
                 if (typeof globalThis.openai?.ready === 'function') {
                     globalThis.openai.ready();
+                    debugLog('notify_ready_openai_ready_called');
                 }
             } catch {
                 // Ignore bridge errors; fallback channels below may still work.
+                debugLog('notify_ready_openai_ready_failed');
             }
 
             try {
@@ -256,13 +333,20 @@
                     method: 'ui/ready',
                     params: {}
                 }, '*');
+                debugLog('notify_ready_postmessage_sent');
             } catch {
                 // Ignore postMessage failures in restricted contexts.
+                debugLog('notify_ready_postmessage_failed');
             }
         }
 
         // --- MCP Apps bridge (postMessage) ---
         globalThis.addEventListener('message', (event) => {
+            debugLog('message_event', {
+                sourceIsParent: event.source === globalThis.parent,
+                summary: summarizePayload(event.data)
+            });
+
             const msg = parseMaybeJson(event.data);
             if (!msg) return;
 
@@ -275,6 +359,7 @@
         }, { passive: true });
 
         document.addEventListener('message', (event) => {
+            debugLog('document_message_event', { summary: summarizePayload(event.data) });
             const msg = parseMaybeJson(event.data);
             if (!msg) return;
             tryRenderFromAny(msg);
@@ -283,6 +368,11 @@
         // --- Apps SDK legacy (window.openai) ---
         function tryLegacy() {
             const output = globalThis.openai?.toolOutput;
+            debugLog('try_legacy', {
+                hasOpenAI: !!globalThis.openai,
+                hasToolOutput: !!output,
+                outputSummary: summarizePayload(output)
+            });
             if (output) {
                 tryRenderFromAny(output);
             }
@@ -294,30 +384,66 @@
             const interval = globalThis.setInterval(() => {
                 attempts += 1;
                 const output = globalThis.openai?.toolOutput;
+
+                if (attempts === 1 || attempts % 10 === 0) {
+                    debugLog('legacy_poll_tick', {
+                        attempts,
+                        hasOpenAI: !!globalThis.openai,
+                        hasToolOutput: !!output
+                    });
+                }
+
                 if (output && tryRenderFromAny(output)) {
                     globalThis.clearInterval(interval);
+                    debugLog('legacy_poll_success', { attempts });
                     return;
                 }
 
                 if (attempts >= maxAttempts) {
                     globalThis.clearInterval(interval);
+                    debugLog('legacy_poll_timeout', { attempts });
                 }
             }, 250);
         }
 
         globalThis.addEventListener('openai:set_globals', (event) => {
             const output = event.detail?.globals?.toolOutput ?? globalThis.openai?.toolOutput;
+            debugLog('openai_set_globals', {
+                hasDetail: !!event.detail,
+                hasToolOutput: !!output,
+                outputSummary: summarizePayload(output)
+            });
             if (output) tryRenderFromAny(output);
         }, { passive: true });
 
         document.addEventListener('openai:set_globals', (event) => {
             const output = event.detail?.globals?.toolOutput ?? globalThis.openai?.toolOutput;
+            debugLog('document_openai_set_globals', {
+                hasDetail: !!event.detail,
+                hasToolOutput: !!output,
+                outputSummary: summarizePayload(output)
+            });
             if (output) tryRenderFromAny(output);
         }, { passive: true });
 
+        debugLog('script_loaded', {
+            href: globalThis.location.href,
+            debugMode: DEBUG_MODE
+        });
         notifyReady();
         tryLegacy();
         startLegacyPolling();
+
+        globalThis.setTimeout(() => {
+            const root = document.getElementById('root');
+            const stillLoading = !!root && /Loading contracts/.test(root.textContent || '');
+            debugLog('loading_timeout_check', {
+                stillLoading,
+                hasOpenAI: !!globalThis.openai,
+                hasToolOutput: !!globalThis.openai?.toolOutput,
+                openAIKeys: globalThis.openai ? Object.keys(globalThis.openai).slice(0, 12) : []
+            });
+        }, 8000);
     </script>
 </body>
 </html>
