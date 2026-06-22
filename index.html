@@ -558,8 +558,16 @@
             }
         }
 
+        function isCallToolAvailable() {
+            return typeof globalThis.openai?.callTool === 'function';
+        }
+
         // --- MCP Apps bridge (postMessage) ---
         globalThis.addEventListener('message', (event) => {
+            // When callTool is available it owns all rendering; legacy sources would
+            // overwrite fresh results with stale toolOutput, causing the flicker bug.
+            if (isCallToolAvailable()) return;
+
             debugLog('message_event', {
                 sourceIsParent: event.source === globalThis.parent,
                 summary: summarizePayload(event.data)
@@ -577,6 +585,8 @@
         }, { passive: true });
 
         document.addEventListener('message', (event) => {
+            if (isCallToolAvailable()) return;
+
             debugLog('document_message_event', { summary: summarizePayload(event.data) });
             const msg = parseMaybeJson(event.data);
             if (!msg) return;
@@ -585,6 +595,8 @@
 
         // --- Apps SDK legacy (window.openai) ---
         function tryLegacy() {
+            if (isCallToolAvailable()) return; // callTool takes precedence
+
             const output = globalThis.openai?.toolOutput;
             debugLog('try_legacy', {
                 hasOpenAI: !!globalThis.openai,
@@ -597,6 +609,8 @@
         }
 
         function startLegacyPolling() {
+            if (isCallToolAvailable()) return; // callTool takes precedence
+
             let attempts = 0;
             const maxAttempts = 80; // ~20s at 250ms
             const interval = globalThis.setInterval(() => {
@@ -625,6 +639,8 @@
         }
 
         globalThis.addEventListener('openai:set_globals', (event) => {
+            if (isCallToolAvailable()) return; // callTool takes precedence
+
             const output = event.detail?.globals?.toolOutput ?? globalThis.openai?.toolOutput;
             debugLog('openai_set_globals', {
                 hasDetail: !!event.detail,
@@ -635,6 +651,8 @@
         }, { passive: true });
 
         document.addEventListener('openai:set_globals', (event) => {
+            if (isCallToolAvailable()) return; // callTool takes precedence
+
             const output = event.detail?.globals?.toolOutput ?? globalThis.openai?.toolOutput;
             debugLog('document_openai_set_globals', {
                 hasDetail: !!event.detail,
